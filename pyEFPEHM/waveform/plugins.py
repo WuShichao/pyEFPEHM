@@ -134,13 +134,15 @@ the same n that both contribute to the same target (l, mp), we key the returned 
 collapsing/summing same-(l, mp, n) contributions from different m together. Summing across m (and
 across n, if desired) for a given (l, mp) is left to the caller.
 
-CONVENTION (mode_convention="pyefpehm_native_fd", also present in generate_hlm_modes'/
-generate_tdomain_hlm_modes' returned dict): this 'hlm' is *not* claimed to equal any external (e.g.
-LAL/PyCBC) inertial-frame h_lm. What is proven -- analytically from the pyEFPEHM paper's (arXiv:2604.11903)
-Eq.(16) Fourier convention, and confirmed numerically at multiple independent, non-degenerate parameter
-points to ~1e-15 relative L2 error, see Tests/test_hlm_modes.py -- is only this model's own, self-consistent
-reconstruction contract (see generate_hlm_modes/generate_tdomain_hlm_modes docstrings in EFPE.py for the
-full derivation and what has and has not been established):
+CONVENTION (mode_convention="pyefpehm_native_fd" for pycbc_fd_modes_plugin, "pyefpehm_native_td" for
+pycbc_td_modes_plugin -- these are DIFFERENT, non-interchangeable conventions, also present in
+generate_hlm_modes'/generate_tdomain_hlm_modes' own returned dict; do not mix them): this 'hlm' is
+*not* claimed to equal any external (e.g. LAL/PyCBC) inertial-frame h_lm. What is proven --
+analytically from the pyEFPEHM paper's (arXiv:2604.11903) Eq.(16) Fourier convention, and confirmed
+numerically at multiple independent, non-degenerate parameter points to ~1e-15 relative L2 error, see
+Tests/test_hlm_modes.py -- is only this model's own, self-consistent reconstruction contract (see
+generate_hlm_modes/generate_tdomain_hlm_modes docstrings in EFPE.py for the full derivation and what
+has and has not been established):
 
     frequency domain:  [h_+, h_x](f) = sum_mp hlm[mp](f) * conj(Proj_{l,mp}(theta, phi))
     time domain:       [h_+, h_x](t) = Re[ sum_mp hlm[mp](t) * Proj_{l,mp}(theta, phi) ]
