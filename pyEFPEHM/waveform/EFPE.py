@@ -80,6 +80,10 @@ class pyEFPE:
 			Array containing [l, m] GW modes to take into account. Only 1PN modes are implemented ([[2,0],[2,1],[2,2],[3,0],[3,1],[3,2],[3,3],[4,0],[4,2],[4,4]])
 			Repeated modes and modes that are inconsistent with the pn_amplitude_order are removed.
 			If mode_array is None, choose all available GW modes.
+			IMPORTANT: m here is the co-precessing-frame multipolar index (called m in Eq.(3) of arXiv:2604.11903), not the inertial-frame
+			spin-weighted spherical-harmonic index m' (called mp in generate_hlm_modes/generate_tdomain_hlm_modes). For a non-precessing binary
+			the two coincide; for a precessing binary they generally do not, since a single co-precessing (l,m) mode "twists up" into
+			contributions at every inertial-frame m'=-l..l. harmonic_array's (l,m,n) triples use this same co-precessing m as their second entry.
 			- Default: [[2,0],[2,1],[2,2],[3,0],[3,1],[3,2],[3,3],[4,0],[4,2],[4,4]]
 
 		-----------  Matter effects parameters for waveform generation -----------
@@ -1123,22 +1127,22 @@ class pyEFPE:
 		viewing angles (Theta, Phi) = (theta_JN, phi_JN) derived from the `inclination`/`phase` parameters), this method returns the un-projected
 		complex multipole moments in the fixed (inertial, J-aligned) frame used internally by the precession solution.
 
-		Reconstruction: for a projector row Proj_{l,mp} = [Ap_{l,mp}, Ac_{l,mp}] built the same way as self.Apc_projs (see interpolate_Apc_prec),
-		but evaluated at any desired fixed viewing angles (Theta, Phi) instead of this model's own (theta_JN, phi_JN), the plus/cross polarizations
-		are recovered (up to summing over all contributing (l, m, n) keys of a given l, see below) via
+		CONVENTION (pyefpehm_native_fd): 'hlm' here is *not* claimed to equal any external (e.g. LAL/PyCBC) inertial-frame h_{lm}(f). What is proven --
+		analytically from the paper's Eq.(16) Fourier convention, and confirmed numerically (candidate comparison at multiple independent, non-degenerate
+		parameter points; relative L2 error ~1e-15, all other candidates tested wrong by O(1)) -- is only the self-consistent reconstruction contract
+		of this model's own polarizations. For a projector row Proj_{l,mp} = [Ap_{l,mp}, Ac_{l,mp}] built the same way as self.Apc_projs (see
+		interpolate_Apc_prec), evaluated at any desired fixed viewing angles (Theta, Phi) instead of this model's own (theta_JN, phi_JN):
 
 			[h_+, h_x](f) = sum_{mp=-l}^{l} hlm[mp](f) * conj(Proj_{l,mp}(Theta, Phi))
 
-		Note the complex conjugate on the projector. This 'hlm' is the frequency-domain twist-up mode h^{lm'} of Eq.(3) of arXiv:2604.11903 (the
-		pyEFPEHM paper), which combines with the *un-conjugated* projector via the textbook relation h_+ - i h_x = sum_{l,mp} h^{lm'} (-2)Y^{lm'}(Theta,Phi)
-		of Eq.(2) -- i.e. the same convention used by e.g. LAL/PyCBC. The conj() appearing above is *not* a departure from that convention: it is
-		purely a Fourier-transform sign-convention artifact. The paper defines the FD transform with a +2*pi*i*f*t kernel (Eq.(16)), the opposite sign
-		from the standard/LAL/PyCBC convention (a -2*pi*i*f*t kernel); since h(t) is real, converting between the two is a single overall complex
-		conjugate, which is exactly the conj(...) that generate_waveform/generate_modes apply once to the whole SPA_fact*Apc_prec*Nlm_p product to
-		reach the standard FD convention (see their docstrings/code comments), and which this method's 'hlm' already has baked in.
-		(generate_tdomain_hlm_modes needs no such conjugate: the paper's Eq.(2) is already stated in the time domain, where pyEFPEHM's and LAL/PyCBC's
-		conventions agree directly -- see that method's docstring.) This has been verified numerically: summing hlm this way for every (l, m, n) key
-		of a given (l, mp) and comparing against generate_modes's own h_{+,x} (using Proj = self.Apc_projs) reproduces it to floating-point precision.
+		Note the complex conjugate on the projector. It is *not* itself proof that 'hlm' equals a conjugated external h_lm(f): the conjugate is
+		consistent with a Fourier-transform sign-convention difference between this paper's Eq.(16) (a +2*pi*i*f*t kernel) and the standard/LAL/PyCBC
+		convention (a -2*pi*i*f*t kernel) applied to the *real* h_+(t)/h_x(t) -- that step is only valid for a real time-domain signal, and does not
+		by itself establish the analogous relation for the individual complex-valued 'hlm' component. Establishing (or ruling out) equality with an
+		external h_lm(f) convention is a separate, not-yet-attempted task. Use reconstruct_polarizations_from_native_modes() to apply the formula
+		above rather than re-deriving it; do not apply a global conj() to 'hlm' on the assumption that it should "look like" another model's h_lm.
+		(generate_tdomain_hlm_modes has no such conjugate: h_+(t)/h_x(t) are built there as 2*Re(Amps*e^{-i phi}) directly, without an outer
+		conjugate -- see that method's docstring. Its 'hlm' is likewise only proven to satisfy its own, unconjugated, self-consistent contract.)
 
 		Because a single fixed inertial-frame index mp generally receives contributions from *all* co-precessing (l, m) multipoles of that l (this is
 		what precession "twist-up" means), and because the SPA/SUA machinery relies on each co-precessing (l, m, n) harmonic having a single well-defined
@@ -1177,8 +1181,9 @@ class pyEFPE:
 		if not self.params['Compute_hlm_Modes']:
 			raise ValueError("generate_hlm_modes requires the class to be initialized with Compute_hlm_Modes=True")
 
-		#initialize dictionary to store the result
-		result = {'freqs': freqs, 'modes': {}}
+		#initialize dictionary to store the result. mode_convention='pyefpehm_native_fd' flags that 'hlm' satisfies only this model's own,
+		#self-consistent reconstruction contract (see docstring above) -- not proven to equal any external convention's h_lm(f)
+		result = {'freqs': freqs, 'mode_convention': 'pyefpehm_native_fd', 'modes': {}}
 
 		#first compute the SPA related things
 		f_idxs, interp_idxs, t_SPA, psi_SPA, T_SPA = self.stationary_times(freqs, rtol=self.params['SPA_Frequency_rtol'])
@@ -1552,11 +1557,14 @@ class pyEFPE:
 
 			[h_+, h_x](t) = sum_{mp=-l}^{l} hlm[mp](t) * Proj_{l,mp}(Theta, Phi)   (real part only; hlm already has the factor of 2 from 2*Re(...) built in)
 
-		where Proj is built the same way as self.Apc_projs (see interpolate_Apc_prec) but at any desired fixed viewing angles. This 'hlm' is directly
-		the time-domain twist-up mode h^{lm'} of Eq.(3) of arXiv:2604.11903 (the pyEFPEHM paper), which combines with the un-conjugated projector via
-		the textbook relation h_+ - i h_x = sum_{l,mp} h^{lm'} (-2)Y^{lm'}(Theta,Phi) of Eq.(2) -- the same convention used by e.g. LAL/PyCBC. Unlike
-		the frequency-domain case (see generate_hlm_modes), no Fourier-transform sign-convention conjugate applies here, since Eq.(2) of the paper is
-		already stated directly in the time domain.
+		where Proj is built the same way as self.Apc_projs (see interpolate_Apc_prec) but at any desired fixed viewing angles.
+
+		CONVENTION (pyefpehm_native_fd, same label as generate_hlm_modes even though this is the time domain): this 'hlm' is *not* claimed to equal
+		any external (e.g. LAL/PyCBC) inertial-frame h_{lm}(t). What is proven -- confirmed numerically at multiple independent, non-degenerate
+		parameter points -- is only the self-consistent reconstruction contract above, i.e. that it reproduces this model's own h_+(t), h_x(t)
+		(as returned by generate_tdomain_waveform/generate_tdomain_modes) via the *un-conjugated* projector. Establishing (or ruling out) equality
+		with an external h_lm(t) convention is a separate, not-yet-attempted task. Use reconstruct_polarizations_from_native_modes() to apply the
+		formula above rather than re-deriving it.
 
 		Parameters
 		----------
@@ -1612,8 +1620,9 @@ class pyEFPE:
 			i_valid = np.nonzero((times>=self.sol.all_ts[0]) & (times<=self.sol.all_ts[-1]))[0]
 			valid_times = times[i_valid]
 
-		#initialize dictionary to store the result
-		result = {'times': times, 'modes': {}}
+		#initialize dictionary to store the result. mode_convention='pyefpehm_native_fd' flags that 'hlm' satisfies only this model's own,
+		#self-consistent reconstruction contract (see docstring above) -- not proven to equal any external convention's h_lm(t)
+		result = {'times': times, 'mode_convention': 'pyefpehm_native_fd', 'modes': {}}
 
 		#find the values of interp_idxs for each time
 		t_idxs, interp_idxs = sorted_vals_in_intervals(valid_times, self.sol.all_ts[self.mode_interp_idx], self.sol.all_ts[self.mode_interp_idx+1])
@@ -1712,4 +1721,72 @@ class pyEFPE:
 
 		#return result dictionary
 		return result
+
+	#function to reconstruct [h_+, h_x] from the dict returned by generate_hlm_modes/generate_tdomain_hlm_modes,
+	#applying the pyefpehm_native_fd reconstruction contract documented in those methods, so callers do not
+	#need to re-derive (or guess) the conj()/no-conj convention themselves
+	def reconstruct_polarizations_from_native_modes(self, result, Theta=None, Phi=None):
+		r"""
+		Reconstruct [h_+, h_x] from the dict returned by generate_hlm_modes(freqs, ...) or
+		generate_tdomain_hlm_modes(times, ...), applying the documented pyefpehm_native_fd
+		reconstruction contract (see those methods' docstrings for the exact formula and what has
+		and has not been proven about this convention).
+
+		Parameters
+		----------
+		result : dict
+			Output of generate_hlm_modes or generate_tdomain_hlm_modes (distinguished by the
+			presence of a 'freqs' vs 'times' key).
+		Theta, Phi : float, optional
+			Fixed viewing angles (radians) at which to project the modes.
+			Default: this model's own (theta_JN, phi_JN), i.e. the same angles
+			generate_waveform/generate_tdomain_waveform use internally (derived from the
+			`inclination`/`phase` parameters) - Default: None (uses this model's own angles)
+
+		Returns
+		-------
+		waveform : ndarray of shape (2, N)
+			[h_+, h_x]. Complex (frequency domain) if `result` came from generate_hlm_modes, real
+			(time domain) if it came from generate_tdomain_hlm_modes - matching the return
+			convention of generate_waveform/generate_tdomain_waveform respectively.
+		"""
+		is_fd = 'freqs' in result
+		n_out = len(result['freqs']) if is_fd else len(result['times'])
+		idx_key = 'freq_idxs' if is_fd else 'time_idxs'
+
+		#default to this model's own fixed viewing angles
+		if Theta is None: Theta = np.arccos(self.cos_theta_JN)
+		if Phi is None: Phi = self.phi_JN
+
+		#build the [Ap,Ac] projector at the requested viewing angles for every l present, mirroring
+		#interpolate_Apc_prec's construction of self.Apc_projs. The projector only depends on the
+		#*parity* of the co-precessing m (not its sign, since (-1)**(-m)==(-1)**m), so it is keyed
+		#here by (l, abs(m)) and is valid for both the m>=0 and (post relabeling) m<0 mode labels
+		#that appear in `result['modes']`
+		l_array = np.unique(self.mode_array[:,0])
+		m2_Ylmp = compute_m2_Ylm(np.cos(Theta), Phi, l_array=l_array)
+		m2_Ylmp = {l: m2_Ylmp[il] for il, l in enumerate(l_array)}
+		Apc_projs_req = {}
+		for l, m in self.mode_array:
+			m2_Ylmp_mod = np.conj(m2_Ylmp[l][::-1])
+			if (m%2)==0: m2_Ylmp_mod[1::2] = -m2_Ylmp_mod[1::2]
+			else       : m2_Ylmp_mod[::2]  = -m2_Ylmp_mod[::2]
+			Ap_proj =   0.5*(m2_Ylmp[l] + m2_Ylmp_mod)
+			Ac_proj = -0.5j*(m2_Ylmp[l] - m2_Ylmp_mod)
+			Apc_projs_req[(l, m)] = np.transpose([Ap_proj, Ac_proj])
+
+		#accumulate each (l, m, n) harmonic's contribution to [h_+, h_x]
+		waveform = np.zeros((n_out, 2), dtype=(np.complex128 if is_fd else float))
+		for (l, m, n), mode in result['modes'].items():
+			Proj = Apc_projs_req[(l, abs(m))]
+			#frequency domain needs the *projector* conjugated before contracting with hlm (NOT the other
+			#way around: hlm is complex, so conj(hlm*Proj) != hlm*conj(Proj) -- see generate_hlm_modes
+			#docstring for why conj(Proj) is the correct one); time domain uses Proj unconjugated, then
+			#takes the real part (see generate_tdomain_hlm_modes docstring)
+			Proj_used = np.conj(Proj) if is_fd else Proj
+			contrib = np.tensordot(mode['hlm'], Proj_used, axes=(1, 0)) #shape (N_mode, 2)
+			if not is_fd: contrib = contrib.real
+			np.add.at(waveform, mode[idx_key], contrib)
+
+		return np.transpose(waveform)
 
