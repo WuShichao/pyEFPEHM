@@ -134,21 +134,25 @@ the same n that both contribute to the same target (l, mp), we key the returned 
 collapsing/summing same-(l, mp, n) contributions from different m together. Summing across m (and
 across n, if desired) for a given (l, mp) is left to the caller.
 
-CONVENTION: this 'hlm' is exactly the twist-up mode h^{lm'} of Eq.(3) of arXiv:2604.11903 (the pyEFPEHM
-paper), which satisfies the textbook relation h_+ - i h_x = sum_{l,mp} h^{lm'} (-2)Y^{lm'}(theta, phi) of
-Eq.(2) of that paper with NO conjugate -- i.e. the same convention used by e.g. LAL/PyCBC's own hlm
-generators (see pycbc.waveform.waveform_modes.sum_modes). Concretely (see generate_hlm_modes and
-generate_tdomain_hlm_modes docstrings in EFPE.py for the derivation):
+CONVENTION (mode_convention="pyefpehm_native_fd", also present in generate_hlm_modes'/
+generate_tdomain_hlm_modes' returned dict): this 'hlm' is *not* claimed to equal any external (e.g.
+LAL/PyCBC) inertial-frame h_lm. What is proven -- analytically from the pyEFPEHM paper's (arXiv:2604.11903)
+Eq.(16) Fourier convention, and confirmed numerically at multiple independent, non-degenerate parameter
+points to ~1e-15 relative L2 error, see Tests/test_hlm_modes.py -- is only this model's own, self-consistent
+reconstruction contract (see generate_hlm_modes/generate_tdomain_hlm_modes docstrings in EFPE.py for the
+full derivation and what has and has not been established):
 
     frequency domain:  [h_+, h_x](f) = sum_mp hlm[mp](f) * conj(Proj_{l,mp}(theta, phi))
     time domain:       [h_+, h_x](t) = Re[ sum_mp hlm[mp](t) * Proj_{l,mp}(theta, phi) ]
 
 where Proj is built the same way as pyEFPE.pyEFPE.Apc_projs (see interpolate_Apc_prec in EFPE.py) at
-the desired (theta, phi). The conj() in the FD case is *not* a departure from the textbook hlm
-convention: it is purely a Fourier-transform sign-convention artifact (the paper's Eq.(16) uses a
-+2*pi*i*f*t kernel, the opposite sign from the standard/LAL/PyCBC -2*pi*i*f*t kernel; since h(t) is
-real, converting between the two is a single overall complex conjugate). No such conjugate is needed
-in the TD case, since the paper's Eq.(2) is already stated directly in the time domain.
+the desired (theta, phi); pyEFPE.pyEFPE.reconstruct_polarizations_from_native_modes() applies this for
+you. The conj() in the FD case is consistent with (but not proof of) a Fourier-transform sign-convention
+difference between the paper's Eq.(16) (a +2*pi*i*f*t kernel) and the standard/LAL/PyCBC convention (a
+-2*pi*i*f*t kernel): that argument is only valid for the *real* h_+(t)/h_x(t) polarizations (which is
+what is proven here), not for an individual complex 'hlm' component in isolation. Do not apply a global
+conj() to these arrays, or treat ulm/vlm below as another model's standard h_lm, on the assumption that
+the FD case "should" work like the TD case, or vice versa -- use the formulas above as given.
 """
 
 def pycbc_fd_modes_plugin(**parameters):
