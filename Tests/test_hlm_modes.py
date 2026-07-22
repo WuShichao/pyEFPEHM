@@ -36,6 +36,16 @@ def rel_l2(a, b):
 	return np.linalg.norm(a - b) / np.linalg.norm(b)
 
 
+def check_mp_hlm_alignment(i, domain, result):
+	'''mode['hlm']'s last axis must be in exact 1:1 correspondence with mode['mp'] (column j <-> mp[j]=j-l).'''
+	for (l, m, n), mode in result['modes'].items():
+		expected_mp = np.arange(-l, l+1)
+		np.testing.assert_array_equal(mode['mp'], expected_mp,
+			err_msg=f"config {i} ({domain}): mode['mp'] for key {(l,m,n)} != arange(-l,l+1)")
+		assert mode['hlm'].shape[-1] == len(expected_mp), (
+			f"config {i} ({domain}): hlm last-axis length {mode['hlm'].shape[-1]} != len(mp) {len(expected_mp)} for key {(l,m,n)}")
+
+
 def test_fd_reconstruction(i, params):
 	wf = pyEFPEHM.pyEFPE(dict(params, Compute_hlm_Modes=True))
 	freqs = np.arange(20.0, FMAX[i], DF[i])
@@ -44,6 +54,7 @@ def test_fd_reconstruction(i, params):
 
 	result = wf.generate_hlm_modes(freqs)
 	assert result['mode_convention'] == 'pyefpehm_native_fd'
+	check_mp_hlm_alignment(i, 'FD', result)
 
 	waveform = wf.reconstruct_polarizations_from_native_modes(result)
 	hp, hc = waveform[0], waveform[1]
@@ -51,6 +62,16 @@ def test_fd_reconstruction(i, params):
 	err_p, err_c = rel_l2(hp, np.asarray(hp_ref)), rel_l2(hc, np.asarray(hc_ref))
 	assert err_p < RTOL and err_c < RTOL, (
 		f"config {i}: FD reconstruction mismatch (rel_l2 hp={err_p:.3e}, hc={err_c:.3e})")
+
+	# a result mislabelled/mismatched with the wrong domain must raise, not silently reconstruct wrongly
+	bad = dict(result); bad['mode_convention'] = 'pyefpehm_native_td'
+	try:
+		wf.reconstruct_polarizations_from_native_modes(bad)
+		raise AssertionError(f"config {i}: reconstruct_polarizations_from_native_modes should have "
+		                     f"raised on a mismatched mode_convention (FD result labelled as TD)")
+	except ValueError:
+		pass
+
 	return result, freqs
 
 
@@ -61,7 +82,8 @@ def test_td_reconstruction(i, params):
 	hp_ref, hc_ref = wf.generate_tdomain_waveform(times)
 
 	result = wf.generate_tdomain_hlm_modes(times)
-	assert result['mode_convention'] == 'pyefpehm_native_fd'
+	assert result['mode_convention'] == 'pyefpehm_native_td'
+	check_mp_hlm_alignment(i, 'TD', result)
 
 	waveform = wf.reconstruct_polarizations_from_native_modes(result)
 	hp, hc = waveform[0], waveform[1]

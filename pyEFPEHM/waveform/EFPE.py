@@ -1559,8 +1559,9 @@ class pyEFPE:
 
 		where Proj is built the same way as self.Apc_projs (see interpolate_Apc_prec) but at any desired fixed viewing angles.
 
-		CONVENTION (pyefpehm_native_fd, same label as generate_hlm_modes even though this is the time domain): this 'hlm' is *not* claimed to equal
-		any external (e.g. LAL/PyCBC) inertial-frame h_{lm}(t). What is proven -- confirmed numerically at multiple independent, non-degenerate
+		CONVENTION (pyefpehm_native_td -- note this is a *different* convention label from generate_hlm_modes' pyefpehm_native_fd; the FD and TD
+		reconstruction contracts must not be mixed, e.g. do not apply the FD conj() here or vice versa): this 'hlm' is *not* claimed to equal any
+		external (e.g. LAL/PyCBC) inertial-frame h_{lm}(t). What is proven -- confirmed numerically at multiple independent, non-degenerate
 		parameter points -- is only the self-consistent reconstruction contract above, i.e. that it reproduces this model's own h_+(t), h_x(t)
 		(as returned by generate_tdomain_waveform/generate_tdomain_modes) via the *un-conjugated* projector. Establishing (or ruling out) equality
 		with an external h_lm(t) convention is a separate, not-yet-attempted task. Use reconstruct_polarizations_from_native_modes() to apply the
@@ -1620,9 +1621,10 @@ class pyEFPE:
 			i_valid = np.nonzero((times>=self.sol.all_ts[0]) & (times<=self.sol.all_ts[-1]))[0]
 			valid_times = times[i_valid]
 
-		#initialize dictionary to store the result. mode_convention='pyefpehm_native_fd' flags that 'hlm' satisfies only this model's own,
-		#self-consistent reconstruction contract (see docstring above) -- not proven to equal any external convention's h_lm(t)
-		result = {'times': times, 'mode_convention': 'pyefpehm_native_fd', 'modes': {}}
+		#initialize dictionary to store the result. mode_convention='pyefpehm_native_td' flags that 'hlm' satisfies only this model's own,
+		#self-consistent time-domain reconstruction contract (see docstring above) -- not proven to equal any external convention's h_lm(t).
+		#Note this is a *different* label from generate_hlm_modes' pyefpehm_native_fd; the two conventions must not be mixed.
+		result = {'times': times, 'mode_convention': 'pyefpehm_native_td', 'modes': {}}
 
 		#find the values of interp_idxs for each time
 		t_idxs, interp_idxs = sorted_vals_in_intervals(valid_times, self.sol.all_ts[self.mode_interp_idx], self.sol.all_ts[self.mode_interp_idx+1])
@@ -1723,20 +1725,26 @@ class pyEFPE:
 		return result
 
 	#function to reconstruct [h_+, h_x] from the dict returned by generate_hlm_modes/generate_tdomain_hlm_modes,
-	#applying the pyefpehm_native_fd reconstruction contract documented in those methods, so callers do not
-	#need to re-derive (or guess) the conj()/no-conj convention themselves
+	#applying the pyefpehm_native_fd/pyefpehm_native_td reconstruction contract documented in those methods
+	#(they are DIFFERENT, non-interchangeable conventions -- see their docstrings), so callers do not need
+	#to re-derive (or guess) the conj()/no-conj split themselves
 	def reconstruct_polarizations_from_native_modes(self, result, Theta=None, Phi=None):
 		r"""
 		Reconstruct [h_+, h_x] from the dict returned by generate_hlm_modes(freqs, ...) or
-		generate_tdomain_hlm_modes(times, ...), applying the documented pyefpehm_native_fd
-		reconstruction contract (see those methods' docstrings for the exact formula and what has
-		and has not been proven about this convention).
+		generate_tdomain_hlm_modes(times, ...), applying the documented pyefpehm_native_fd /
+		pyefpehm_native_td reconstruction contract (see those methods' docstrings for the exact
+		formula and what has and has not been proven about each convention -- they are different
+		and must not be mixed, e.g. by passing a frequency-domain 'result' but expecting the
+		time-domain, un-conjugated formula to apply, or vice versa).
 
 		Parameters
 		----------
 		result : dict
 			Output of generate_hlm_modes or generate_tdomain_hlm_modes (distinguished by the
-			presence of a 'freqs' vs 'times' key).
+			presence of a 'freqs' vs 'times' key). Must carry the 'mode_convention' key that both
+			of those methods populate ('pyefpehm_native_fd' or 'pyefpehm_native_td' respectively);
+			a mismatched or missing value raises ValueError rather than silently applying the wrong
+			domain's formula.
 		Theta, Phi : float, optional
 			Fixed viewing angles (radians) at which to project the modes.
 			Default: this model's own (theta_JN, phi_JN), i.e. the same angles
@@ -1749,8 +1757,25 @@ class pyEFPE:
 			[h_+, h_x]. Complex (frequency domain) if `result` came from generate_hlm_modes, real
 			(time domain) if it came from generate_tdomain_hlm_modes - matching the return
 			convention of generate_waveform/generate_tdomain_waveform respectively.
+
+		Raises
+		------
+		ValueError
+			If `result` carries neither a 'freqs' nor a 'times' key, or if its 'mode_convention'
+			does not match the domain implied by which of those two keys is present.
 		"""
 		is_fd = 'freqs' in result
+		is_td = 'times' in result
+		if not (is_fd or is_td):
+			raise ValueError("result must be the output of generate_hlm_modes (has a 'freqs' key) "
+			                 "or generate_tdomain_hlm_modes (has a 'times' key); got neither.")
+		expected_convention = 'pyefpehm_native_fd' if is_fd else 'pyefpehm_native_td'
+		if result.get('mode_convention') != expected_convention:
+			raise ValueError("result['mode_convention']=%r does not match the expected %r for this "
+			                 "domain (%s); the frequency- and time-domain native reconstruction "
+			                 "contracts are different and must not be mixed."
+			                 % (result.get('mode_convention'), expected_convention, 'FD' if is_fd else 'TD'))
+
 		n_out = len(result['freqs']) if is_fd else len(result['times'])
 		idx_key = 'freq_idxs' if is_fd else 'time_idxs'
 
