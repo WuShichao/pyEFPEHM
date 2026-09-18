@@ -16,6 +16,7 @@ from pyEFPEHM.utils.cython_utils import my_cgroup_idxs_by_vals
 from pyEFPEHM.waveform.functions import *
 from pyEFPEHM.waveform.amplitudes import *
 from scipy.interpolate import CubicSpline
+from pyEFPEHM.utils.constants import (G_SI, c_SI, M_sun_SI,)
 
 #universal constants
 t_sun_s = 4.92549094831e-6  #GMsun/c**3 [s]
@@ -176,6 +177,36 @@ class pyEFPE:
 		Compute_hlm_Modes: bool
 			Choose whether or not to also set up the interpolants needed by generate_hlm_modes/generate_tdomain_hlm_modes (the raw, pre spherical-harmonic-projection multipole moments).
 			Only takes effect when Interpolate_Amplitudes=True; leave False if you never call those methods, to avoid the extra interpolation cost - Default: False
+            
+		----------- Parameters of environmental effects -----------
+		environmental_model : str or None
+			Environmental phase-correction model to include. Available options are None, 'roemer', 'bhl', and 'supersonic'. 
+			If None, no environmental phase correction is applied. - Default: None
+            
+		environmental_redshift : float
+			Cosmological redshift of the source. This is used to convert detector-frame frequencies and masses to their corresponding
+			source-frame values when evaluating the environmental phase correction. Must be non-negative. - Default: 0.0
+            
+		environmental_phase_sign : float
+			Overall sign multiplying the environmental correction added to the internal Fourier phase. Must be either +1.0 or -1.0. This
+			parameter accounts for the chosen Fourier-transform and dephasing sign conventions. - Default: 1.0
+            
+		tertiary_mass : float
+			Source-frame mass of the tertiary object entering the Roemer-delay correction, in solar masses. Used only when
+			environmental_model='roemer_delay' and required to be positive in that case. - Default: 0.0
+            
+		tertiary_distance : float
+			Instantaneous separation between the tertiary object and the center of mass of the inner binary, in metres. Used only when
+			environmental_model='roemer_delay' and required to be positive in that case. - Default: 0.0
+            
+		gas_density : float
+			Local rest-mass density of the gaseous environment, in kg m^-3. Used by the BHL and supersonic-drag corrections and required to be
+			non-negative. - Default: 0.0
+            
+		sound_speed : float
+			Local speed of sound in the gaseous environment, in m s^-1. Used only when environmental_model='bhl_drag' and required to be
+			positive in that case. The supersonic-drag model does not use this parameter. - Default: 0.0
+            
 		"""
 		#dictionary with default params
 		params = {'eccentricity': 0,
@@ -216,6 +247,13 @@ class pyEFPE:
 		          'SPA_Frequency_rtol': 1e-12,
 		          'SUA_kmax': 1,
 		          'Compute_hlm_Modes': False,
+				  'environmental_model': None,
+				  'environmental_redshift': 0.0,
+				  'environmental_phase_sign': 1.0,
+				  'tertiary_mass': 0.0,       
+				  'tertiary_distance': 0.0,   
+				  'gas_density': 0.0,         
+				  'sound_speed': 0.0,
 		         }
 		
 		#validate the input parameters and merge them with the defaults (maps deprecated *_start keys, warns on typos / out-of-range values, raises on invalid masses or eccentricity)
@@ -228,6 +266,18 @@ class pyEFPE:
 		#we convert the masses from Msun to seconds
 		self.m1 = t_sun_s*params['mass1']
 		self.m2 = t_sun_s*params['mass2']
+
+		# treat pyEFPE input masses as detector-frame masses. Expressions of environmental effects involve source-frame masses
+		z_env = params['environmental_redshift']
+		m1_source_solar = params['mass1'] / (1.0 + z_env)
+		m2_source_solar = params['mass2'] / (1.0 + z_env)
+		self.m1_env_SI = m1_source_solar * M_sun_SI
+		self.m2_env_SI = m2_source_solar * M_sun_SI
+		self.M_env_SI = self.m1_env_SI + self.m2_env_SI
+		self.mu_env_SI = (self.m1_env_SI * self.m2_env_SI / self.M_env_SI)
+		self.Mchirp_env_SI = ((self.m1_env_SI * self.m2_env_SI)**(3.0 / 5.0) / self.M_env_SI**(1.0 / 5.0))
+		self._environmental_eccentricity_warning_issued = False
+        
 		self.e_ref = params['eccentricity']
 		#Extract the dimensionless component spins (S_i/mu_i^2 = s_i/mu_i)
 		self.spin0_1 = np.array([params['spin1x'], params['spin1y'], params['spin1z']])
@@ -487,8 +537,232 @@ class pyEFPE:
 			elif (not (0<=params['pn_tidal_order']<10)) and ((params['Lambda2_1']!=0) or (params['Lambda2_2']!=0)):
 				warnings.warn("horizon_absorption=True applies black-hole horizon flux to a component with nonzero tidal Lambda2.", UserWarning, stacklevel=3)
 
+		#warnings related to environmental effects parameters
+		environmental_models = {None, 'roemer', 'bhl', 'supersonic'}
+		if params['environmental_model'] not in environmental_models:
+			raise ValueError("environmental_model must be one of: None, 'roemer', 'bhl', or 'supersonic'")
+            
+		if params['environmental_redshift'] < 0:
+			raise ValueError("environmental_redshift must be non-negative")
+        
+		if params['environmental_phase_sign'] not in (-1.0, 1.0):
+			raise ValueError("environmental_phase_sign must be +1 or -1")
+        
+		if params['gas_density'] < 0:
+			raise ValueError("gas_density must be non-negative")
+        
+		if params['environmental_model'] == 'bhl':
+			if params['sound_speed'] <= 0:
+				raise ValueError("sound_speed must be positive for BHL drag")
+        
+		if params['environmental_model'] == 'supersonic':
+			if params['gas_density'] <= 0:
+				raise ValueError("gas_density must be positive for supersonic drag")
+        
+		if params['environmental_model'] == 'roemer':
+			if params['tertiary_mass'] <= 0:
+				raise ValueError("tertiary_mass must be positive for Roemer delay")
+			if params['tertiary_distance'] <= 0:
+				raise ValueError("tertiary_distance must be positive for Roemer delay")
+        
 		#return the merged parameter dictionary
 		return params
+
+	# ============================================================
+	# Environmental phase corrections
+	# ============================================================
+
+	@staticmethod
+	def _peters_enhancement(e):
+		"""Peters GW-flux enhancement F(e), Eq. (19) in Zwick et al (2025)."""
+		e = np.asarray(e, dtype=float)
+		e2 = e * e
+    
+		return (1.0 + (73.0 / 24.0) * e2 + (37.0 / 96.0) * e2**2) / (1.0 - e2)**3.5
+    
+    
+	@staticmethod
+	def _inspiral_ratio_R(e):
+		"""R(e) approximation, Eq. (20) in Zwick et al (2025)."""
+		e = np.asarray(e, dtype=float)
+		return 8.0**(1.0 - np.sqrt(1.0 - e))
+    
+    
+	@staticmethod
+	def _bhl_eccentricity_factor(e):
+		"""BHL series through e^6, Eq. (55) in Zwick et al (2025)."""
+		e2 = np.asarray(e, dtype=float)**2
+    
+		return (1.0 + (3.0 / 4.0) * e2 + (33.0 / 64.0) * e2**2 + (107.0 / 256.0) * e2**3)
+    
+    
+	@staticmethod
+	def _supersonic_eccentricity_factor(e):
+		"""Supersonic series through e^6, Eq. (59) in Zwick et al (2025)."""
+		e2 = np.asarray(e, dtype=float)**2
+    
+		return (1.0 - (1.0 / 4.0) * e2 - (7.0 / 64.0) * e2**2 - (17.0 / 256.0) * e2**3)
+
+	def _warn_truncated_environmental_eccentricity(self, e):
+		"""Warn once when the truncated drag expansions are used at high e."""
+		if (
+			not self._environmental_eccentricity_warning_issued
+			and np.any(np.asarray(e) > 0.7)
+		):
+			warnings.warn(
+				"The BHL and supersonic-drag eccentricity factors "
+				"are truncated at O(e^6) and may be inaccurate for e > 0.7.",
+				UserWarning,
+				stacklevel=3,
+			)
+			self._environmental_eccentricity_warning_issued = True
+
+	def _warn_tdomain_environment_ignored(self):
+		"""Warn when a selected environmental model is ignored in the time domain."""
+		if self.params["environmental_model"] is not None:
+			warnings.warn(
+				"Environmental phase corrections are currently implemented "
+				"only for frequency-domain waveforms. "
+				"generate_tdomain_waveform() and generate_tdomain_modes() "
+				"return waveforms without the selected environmental effect. "
+				"Use generate_waveform() to include it.",
+				UserWarning,
+				stacklevel=3,
+			)
+    
+	def _delta_psi2_roemer(self, f22_obs, e):
+		"""Roemer delay, Eq. (18) in Zwick et al (2026)"""
+
+		z = self.params['environmental_redshift']
+    
+		f22_source = (1.0 + z) * np.asarray(f22_obs)
+    
+		m3_SI = (self.params['tertiary_mass'] * M_sun_SI)
+		separation_SI = self.params['tertiary_distance']
+    
+		F_e = self._peters_enhancement(e)
+		R_e = self._inspiral_ratio_R(e)
+    
+		coefficient = (5.0 / (256.0 * np.pi**(13.0 / 6.0)))**2
+    
+		return (
+			coefficient
+			* c_SI**9
+			* m3_SI
+			* f22_source**(-13.0 / 3.0)
+			/ (separation_SI**2 * G_SI**(7.0 / 3.0) * self.Mchirp_env_SI**(10.0 / 3.0))
+			* (R_e / F_e)**2
+		)
+
+	def _delta_psi2_bhl(self, f22_obs, e):
+		""" BHL drag, Eq. (56) in Zwick et al (2025)"""
+
+		self._warn_truncated_environmental_eccentricity(e)
+
+		rho = self.params['gas_density']
+		cs = self.params['sound_speed']
+		z = self.params['environmental_redshift']
+    
+		# Source-frame frequency
+		f22_source = (1.0 + z) * np.asarray(f22_obs)
+    
+		F_e = self._peters_enhancement(e)
+		R_e = self._inspiral_ratio_R(e)
+		F_bhl = self._bhl_eccentricity_factor(e)
+    
+		coefficient = (75.0 / (16384.0 * np.pi**(11.0 / 3.0)))
+    
+		return (coefficient 
+			* c_SI**10 
+			* self.Mchirp_env_SI**(5.0 / 6.0) 
+			* rho 
+			* f22_source**(-14.0 / 3.0)
+			/ (cs**2 * G_SI**(5.0 / 3.0)  * self.mu_env_SI**(7.0 / 2.0)) 
+			* F_bhl 
+			* (R_e / F_e)**2
+		)
+
+	def _delta_psi2_supersonic(self, f22_obs, e):
+		""" Supersonic drag, Eq. (60) in Zwick et al (2025)"""
+
+		self._warn_truncated_environmental_eccentricity(e)
+
+		rho = self.params['gas_density']
+		z = self.params['environmental_redshift']
+    
+		f22_source = (1.0 + z) * np.asarray(f22_obs)
+    
+		F_e = self._peters_enhancement(e)
+		R_e = self._inspiral_ratio_R(e)
+		F_sup = self._supersonic_eccentricity_factor(e)
+    
+		coefficient = (75.0 / (16384.0 * np.pi**(13.0 / 3.0)))
+    
+		return (
+			coefficient
+			* c_SI**10
+			* rho
+			* f22_source**(-16.0 / 3.0)
+			/ (G_SI**(7.0 / 3.0) * self.Mchirp_env_SI**(5.0 / 6.0) * self.mu_env_SI**(5.0 / 2.0))
+			* F_sup
+			* (R_e / F_e)**2
+		)
+
+	def _delta_psi2_environment(self, f22_obs, e):
+		"""
+		Approximate ell=2 Fourier correction, using delta psi ~= delta phi.
+		"""
+		model = self.params['environmental_model']
+    
+		if model is None:
+			return np.zeros_like(np.asarray(f22_obs), dtype=float)
+    
+		if model == 'roemer':
+			return self._delta_psi2_roemer(f22_obs, e)
+    
+		if model == 'bhl':
+			return self._delta_psi2_bhl(f22_obs, e)
+    
+		if model == 'supersonic':
+			return self._delta_psi2_supersonic(f22_obs, e)
+    
+		# Parameter validation should make this unreachable.
+		raise RuntimeError("Unsupported environmental model: %s" % model)
+
+	def _environmental_harmonic_phase(self, f_detector, e, ell):
+		"""
+		Eq. (22) in Zwick et al (2026):
+    
+			delta psi_ell(f) = (ell/2) delta psi_2(2f/ell).
+    
+		Here ell is the eccentric harmonic number abs(p), not the spherical-harmonic multipole l.
+		"""
+		f_detector = np.asarray(f_detector, dtype=float)
+		e = np.asarray(e, dtype=float)
+		ell = np.asarray(ell, dtype=int)
+    
+		result = np.zeros_like(f_detector)
+    
+		# Zwick et al (2026) only defines the mapping for ell >= 1.
+		valid = ell > 0
+    
+		if not np.any(valid):
+			return result
+    
+		# Equivalent ell=2 frequency at the same orbital epoch.
+		f22_equivalent = (2.0 * f_detector[valid] / ell[valid])
+    
+		delta_psi2 = self._delta_psi2_environment(f22_equivalent, e[valid])
+    
+		result[valid] = (0.5 * ell[valid] * delta_psi2)
+    
+		return result
+
+
+
+	# ============================================================
+	# Stationary-phase calculation
+	# ============================================================
 
 	#function to compute stationary times given an input array of frequencies (see Eq.(46) of arXiv:1801.08542)
 	def stationary_times(self, freqs, rtol=1e-12, max_iter=3):
@@ -577,9 +851,27 @@ class pyEFPE:
 		#now compute actual T_SPA
 		T_SPA = 1/np.sqrt(T_SPA)
 
-		#take into account that \psi_s = 2 \pi f t_s - \phi(t_s) - pi/4
+		#take into account that \psi_s = 2 \pi f t_s - \phi(t_s) - pi/4 (Vacuum SPA Fourier phase)
 		psi_SPA = ws*t_SPA - psi_SPA - 0.25*np.pi
 
+		# add approximate environmental Fourier-phase correction.
+		if self.params['environmental_model'] is not None:
+        
+			# detector frequency for every harmonic contribution.
+			f_detector = ws / (2.0 * np.pi)
+        
+			# binary eccentricity at the harmonic's stationary time.
+			# idxs=1 returns the e^2 evolution variable.
+			e2_SPA = np.asarray(self.sol(t_SPA, idxs=1))
+			e_SPA = np.sqrt(np.clip(e2_SPA, 0.0, 1.0 - 1.0e-14))
+        
+			# in Zwick et al (2026) ell is pyEFPEHM's abs(p), not its l.
+			ell = np.abs(self.necessary_ps[interp_idxs])
+        
+			delta_psi_environment = (self._environmental_harmonic_phase(f_detector, e_SPA, ell,))
+        
+			psi_SPA += (self.params['environmental_phase_sign'] * delta_psi_environment)
+        
 		#return all the SPA related things that will be needed in the future
 		return f_idxs, interp_idxs, t_SPA, psi_SPA, T_SPA
 
@@ -1314,6 +1606,8 @@ class pyEFPE:
 			If neither `times` nor `delta_t` is provided.
 		"""
 		
+		self._warn_tdomain_environment_ignored()
+        
 		#if no time-array is given, create it
 		if times is None:
 			if delta_t is None: raise ValueError("To compute time-domain waveform, please give either an array of times or a time spacing delta_t")
@@ -1423,6 +1717,8 @@ class pyEFPE:
 			If neither `times` nor `delta_t` is provided.
 		"""
 		
+		self._warn_tdomain_environment_ignored()
+        
 		#if no time-array is given, create it
 		if times is None:
 			if delta_t is None: raise ValueError("To compute time-domain waveform, please give either an array of times or a time spacing delta_t")
