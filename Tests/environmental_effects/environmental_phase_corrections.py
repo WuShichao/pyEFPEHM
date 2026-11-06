@@ -419,15 +419,54 @@ def test_complete_mode_generation(model, extra_parameters):
         assert np.all(np.isfinite(mode["t_SPA"]))
         assert np.all(np.isfinite(mode["T_SPA"]))
 
-def test_tdomain_warns_when_environment_is_selected():
-    """Test whether the code returns a warning when trying to call a waveform with environmental effects in time domain"""
+def test_tdomain_environmental_phase_scales_with_harmonic():
+    """Test time-domain mode reconstruction with environmental effects"""
+    
+    # Select two eccentric harmonics of the same (l, m) multipole. Only the eccentric harmonic index p changes between them.
+    harmonics = [(2, 2, 2), (2, 2, 3)]
+    params = {
+        "mass1": 50.0,
+        "mass2": 25.0,
+        "eccentricity": 0.01,
+        "inclination": 0.9,
+        "f22_start": 0.01,
+        "f22_end": 0.1,
+        "harmonic_array": harmonics,
+        "Compute_hlm_Modes": True,
+    }
 
-    # generate waveform with supersonic drag
-    waveform = make_waveform(environmental_model="supersonic",gas_density=1.0)
+    # Use identical binary parameters so the phase difference isolates the environmental correction
+    vacuum = pyEFPEHM.pyEFPE(params)
+    roemer = pyEFPEHM.pyEFPE({**params, "environmental_model": "roemer", "tertiary_mass": 1e4, "tertiary_distance": 1e13})
 
-    # call waveform in time domain
-    with pytest.warns(UserWarning, match="Environmental phase corrections"):
-        waveform.generate_tdomain_waveform(times=np.array([waveform.return_start_time()]))
+    # Evaluate both waveforms on the same grid, excluding the endpoints
+    times = np.linspace(vacuum.return_start_time(), vacuum.return_end_time(), 258)[1:-1]
+
+    # Request the intermediate phase arrays so we can compare the phase directly, without extracting it from the complex hlm values
+    vacuum_result = vacuum.generate_tdomain_hlm_modes(times, return_waveform_pieces=True)
+    roemer_result = roemer.generate_tdomain_hlm_modes(times, return_waveform_pieces=True)
+
+    phase_shifts = {}
+    for key in harmonics:
+        vacuum_mode = vacuum_result["modes"][key]
+        roemer_mode = roemer_result["modes"][key]
+
+        # The mode arrays carry indices into the requested time grid. Check that the samples line up before subtracting the phases.
+        np.testing.assert_array_equal(roemer_mode["time_idxs"], vacuum_mode["time_idxs"])
+        phase_shifts[key] = roemer_mode["phase"] - vacuum_mode["phase"]
+
+        # Catch a mode that returns the vacuum phase
+        assert np.max(np.abs(phase_shifts[key])) > 1e-8
+
+    # Both harmonics must be evaluated at the same times for this ratio. At fixed time, each gets |p| times the same orbital phase correction.
+    np.testing.assert_array_equal(roemer_result["modes"][(2, 2, 2)]["time_idxs"], roemer_result["modes"][(2, 2, 3)]["time_idxs"])
+    np.testing.assert_allclose(phase_shifts[(2, 2, 3)], 1.5 * phase_shifts[(2, 2, 2)], rtol=1e-12, atol=5e-7)
+
+    # Project and sum the corrected native modes, then compare both polarizations with those from the direct time-domain waveform path.
+    reconstructed = roemer.reconstruct_polarizations_from_native_modes(roemer_result)
+    direct = roemer.generate_tdomain_waveform(times)
+    relative_error = (np.linalg.norm(reconstructed - direct) / np.linalg.norm(direct))
+    assert relative_error < 1e-7
 
 def test_tdomain_does_not_warn_for_vacuum():
     """Verify that the vacuum waveform returns no warning related to environmental effects when called in time domain"""

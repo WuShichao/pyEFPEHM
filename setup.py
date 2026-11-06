@@ -52,6 +52,6 @@ setup(
         'Intended Audience :: Science/Research',
         'Topic :: Scientific/Engineering :: Physics',
     ],
-    entry_points={"pycbc.waveform.fd": ["pyEFPEHM = pyEFPEHM.utils.pycbc_plugin:pyefpe_fd"]},
+    #entry_points={"pycbc.waveform.fd": ["pyEFPEHM = pyEFPEHM.utils.pycbc_plugin:pyefpe_fd"]},
 )
 
